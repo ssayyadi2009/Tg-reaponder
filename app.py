@@ -1,5 +1,6 @@
 import os
 import logging
+import asyncio
 from fastapi import FastAPI
 from aiogram import Bot, Dispatcher
 from aiogram.filters import Command
@@ -11,18 +12,17 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # --- تنظیمات اصلی ---
-BOT_TOKEN = os.getenv("BOT_TOKEN")  # باید در Render تنظیم شود
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
-    logger.error("BOT_TOKEN not set in environment variables!")
-    raise ValueError("BOT_TOKEN environment variable not set")
+    logger.error("BOT_TOKEN environment variable not set!")
+    raise ValueError("BOT_TOKEN is required")
 
-# --- FastAPI برای Health Check ---
-fastapi_app = FastAPI()
+# --- FastAPI (برای Health Check) ---
+app = FastAPI()
 
-@fastapi_app.get("/healthz")
+@app.get("/healthz")
 async def health_check():
-    """Endpoint برای UptimeRobot/Cron-job"""
-    return {"status": "ok", "bot": "running"}
+    return {"status": "ok", "message": "Bot is alive!"}
 
 # --- Aiogram (بات تلگرام) ---
 bot = Bot(token=BOT_TOKEN, parse_mode="HTML")
@@ -40,30 +40,27 @@ async def init_db():
         """)
         await db.commit()
 
-# --- هندلرهای بات ---
+# --- هندلرها ---
 @dp.message(Command("start"))
 async def start_handler(message: Message):
     user_id = message.from_user.id
     username = message.from_user.username or "N/A"
 
     async with aiosqlite.connect("bot.db") as db:
-        # چک کردن کاربر
         cur = await db.execute("SELECT start_count FROM users WHERE user_id = ?", (user_id,))
         row = await cur.fetchone()
 
         if row:
-            # کاربر قدیمی
             new_count = row[0] + 1
             await db.execute(
                 "UPDATE users SET start_count = ?, username = ? WHERE user_id = ?",
                 (new_count, username, user_id)
             )
             await message.answer(
-                f"👋 <b>خوش آمدی دوباره!</b>\n\n"
+                f"👋 <b>خوش آمدیاره!</b>\n\n"
                 f"شما قبلا {row[0]} بار /start زدید."
             )
         else:
-            # کاربر جدید
             await db.execute(
                 "INSERT INTO users (user_id, username, start_count) VALUES (?, ?, 1)",
                 (user_id, username)
@@ -75,13 +72,12 @@ async def start_handler(message: Message):
         await db.commit()
 
 # --- استارت FastAPI + Aiogram ---
-@fastapi_app.on_event("startup")
+@app.on_event("startup")
 async def on_startup():
     await init_db()
-    logger.info("Starting bot polling...")
     asyncio.create_task(dp.start_polling(bot))
 
-# --- برای اجرای مستقیم (مورد نیاز نیست، فقط برای تست) ---
+# --- برای تست محلی ---
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(fastapi_app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=8000)
