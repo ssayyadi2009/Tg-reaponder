@@ -1,0 +1,6 @@
+aiogram==3.*
+fastapi
+uvicorn[standard]
+gunicorn
+aiosqlite
+python-dotenv
