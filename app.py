@@ -1,5 +1,4 @@
 import os
-import logging
 import asyncio
 from fastapi import FastAPI
 from aiogram import Bot, Dispatcher
@@ -7,77 +6,55 @@ from aiogram.filters import Command
 from aiogram.types import Message
 import aiosqlite
 
-# --- تنظیمات لگ ---
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# --- تنظیمات ---
+BOT_TOKEN = os.environ["BOT_TOKEN"]  # باید در Render تنظیم شود
+DB_PATH = "bot.db"
 
-# --- تنظیمات اصلی ---
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-if not BOT_TOKEN:
-    logger.error("BOT_TOKEN environment variable not set!")
-    raise ValueError("BOT_TOKEN is required")
+# --- متون بات ---
+FIRST_START_TEXT = "سلام! نخستین بار است که /start می‌زنید."
+REPEAT_START_TEXT = "خوش آمدید دوباره! از منو گزینه‌ای رو انتخاب کنید."
 
 # --- FastAPI (برای Health Check) ---
 app = FastAPI()
 
 @app.get("/healthz")
-async def health_check():
-    return {"status": "ok", "message": "Bot is alive!"}
-
-# --- Aiogram (بات تلگرام) ---
-bot = Bot(token=BOT_TOKEN, parse_mode="HTML")
-dp = Dispatcher()
+async def healthz():
+    return {"ok": True}
 
 # --- دیتابیس SQLite ---
 async def init_db():
-    async with aiosqlite.connect("bot.db") as db:
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS users (
-                user_id INTEGER PRIMARY KEY,
-                username TEXT,
-                start_count INTEGER DEFAULT 0
-            )
-        """)
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, start_count INTEGER DEFAULT 0)")
         await db.commit()
 
-# --- هندلرها ---
-@dp.message(Command("start"))
-async def start_handler(message: Message):
-    user_id = message.from_user.id
-    username = message.from_user.username or "N/A"
-
-    async with aiosqlite.connect("bot.db") as db:
+async def get_start_count(user_id: int) -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute("SELECT start_count FROM users WHERE user_id = ?", (user_id,))
         row = await cur.fetchone()
+        return row[0] if row else 0
 
-        if row:
-            new_count = row[0] + 1
-            await db.execute(
-                "UPDATE users SET start_count = ?, username = ? WHERE user_id = ?",
-                (new_count, username, user_id)
-            )
-            await message.answer(
-                f"👋 <b>خوش آمدیاره!</b>\n\n"
-                f"شما قبلا {row[0]} بار /start زدید."
-            )
-        else:
-            await db.execute(
-                "INSERT INTO users (user_id, username, start_count) VALUES (?, ?, 1)",
-                (user_id, username)
-            )
-            await message.answer(
-                f"🎉 <b>خوش آمدی!</b>\n\n"
-                f"این اولین بار است که از بات استفاده می‌کنی."
-            )
+async def increment_start_count(user_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (user_id,))
+        await db.execute("UPDATE users SET start_count = start_count + 1 WHERE user_id = ?", (user_id,))
         await db.commit()
+
+# --- Aiogram (بات تلگرام) ---
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher()
+
+@dp.message(Command("start"))
+async def on_start(message: Message):
+    user_id = message.from_user.id
+    count = await get_start_count(user_id)
+    if count == 0:
+        await message.answer(FIRST_START_TEXT)
+    else:
+        await message.answer(REPEAT_START_TEXT)
+    await increment_start_count(user_id)
 
 # --- استارت FastAPI + Aiogram ---
 @app.on_event("startup")
 async def on_startup():
     await init_db()
     asyncio.create_task(dp.start_polling(bot))
-
-# --- برای تست محلی ---
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
