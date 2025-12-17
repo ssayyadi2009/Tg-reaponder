@@ -1,60 +1,87 @@
 import os
-import asyncio
+import logging
 from fastapi import FastAPI
 from aiogram import Bot, Dispatcher
 from aiogram.filters import Command
 from aiogram.types import Message
 import aiosqlite
 
-# --- تنظیمات ---
-BOT_TOKEN = os.environ["BOT_TOKEN"]  # باید در Render تنظیم شود
-DB_PATH = "bot.db"
+# --- تنظیمات لگ ---
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# --- متون بات ---
-FIRST_START_TEXT = "سلام! نخستین بار است که /start می‌زنید."
-REPEAT_START_TEXT = "خوش آمدید دوباره! از منو گزینه‌ای رو انتخاب کنید."
+# --- تنظیمات اصلی ---
+BOT_TOKEN = os.getenv("BOT_TOKEN")  # باید در Render تنظیم شود
+if not BOT_TOKEN:
+    logger.error("BOT_TOKEN not set in environment variables!")
+    raise ValueError("BOT_TOKEN environment variable not set")
 
-# --- FastAPI (برای Health Check) ---
-app = FastAPI()
+# --- FastAPI برای Health Check ---
+fastapi_app = FastAPI()
 
-@app.get("/healthz")
-async def healthz():
-    return {"ok": True}
+@fastapi_app.get("/healthz")
+async def health_check():
+    """Endpoint برای UptimeRobot/Cron-job"""
+    return {"status": "ok", "bot": "running"}
+
+# --- Aiogram (بات تلگرام) ---
+bot = Bot(token=BOT_TOKEN, parse_mode="HTML")
+dp = Dispatcher()
 
 # --- دیتابیس SQLite ---
 async def init_db():
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, start_count INTEGER DEFAULT 0)")
+    async with aiosqlite.connect("bot.db") as db:
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER PRIMARY KEY,
+                username TEXT,
+                start_count INTEGER DEFAULT 0
+            )
+        """)
         await db.commit()
 
-async def get_start_count(user_id: int) -> int:
-    async with aiosqlite.connect(DB_PATH) as db:
+# --- هندلرهای بات ---
+@dp.message(Command("start"))
+async def start_handler(message: Message):
+    user_id = message.from_user.id
+    username = message.from_user.username or "N/A"
+
+    async with aiosqlite.connect("bot.db") as db:
+        # چک کردن کاربر
         cur = await db.execute("SELECT start_count FROM users WHERE user_id = ?", (user_id,))
         row = await cur.fetchone()
-        return row[0] if row else 0
 
-async def increment_start_count(user_id: int):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (user_id,))
-        await db.execute("UPDATE users SET start_count = start_count + 1 WHERE user_id = ?", (user_id,))
+        if row:
+            # کاربر قدیمی
+            new_count = row[0] + 1
+            await db.execute(
+                "UPDATE users SET start_count = ?, username = ? WHERE user_id = ?",
+                (new_count, username, user_id)
+            )
+            await message.answer(
+                f"👋 <b>خوش آمدی دوباره!</b>\n\n"
+                f"شما قبلا {row[0]} بار /start زدید."
+            )
+        else:
+            # کاربر جدید
+            await db.execute(
+                "INSERT INTO users (user_id, username, start_count) VALUES (?, ?, 1)",
+                (user_id, username)
+            )
+            await message.answer(
+                f"🎉 <b>خوش آمدی!</b>\n\n"
+                f"این اولین بار است که از بات استفاده می‌کنی."
+            )
         await db.commit()
 
-# --- Aiogram (بات تلگرام) ---
-bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher()
-
-@dp.message(Command("start"))
-async def on_start(message: Message):
-    user_id = message.from_user.id
-    count = await get_start_count(user_id)
-    if count == 0:
-        await message.answer(FIRST_START_TEXT)
-    else:
-        await message.answer(REPEAT_START_TEXT)
-    await increment_start_count(user_id)
-
 # --- استارت FastAPI + Aiogram ---
-@app.on_event("startup")
+@fastapi_app.on_event("startup")
 async def on_startup():
     await init_db()
+    logger.info("Starting bot polling...")
     asyncio.create_task(dp.start_polling(bot))
+
+# --- برای اجرای مستقیم (مورد نیاز نیست، فقط برای تست) ---
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(fastapi_app, host="0.0.0.0", port=8000)
