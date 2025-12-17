@@ -4,4 +4,3 @@ __pycache__/
 *.pyd
 .env
 bot.db
-.DS_Store
